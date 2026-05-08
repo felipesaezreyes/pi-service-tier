@@ -3,13 +3,13 @@ import {
   type ExtensionAPI,
   type ExtensionCommandContext,
   type ExtensionContext,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 import {
   Container,
   SettingsList,
   Text,
   type SettingItem,
-} from "@mariozechner/pi-tui";
+} from "@earendil-works/pi-tui";
 import {
   DEFAULT_SERVICE_TIER_CONFIG,
   SERVICE_TIER_PROVIDER_DEFINITIONS,

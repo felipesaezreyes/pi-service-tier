@@ -1,6 +1,6 @@
 # ⚡ pi-service-tier
 
-A [pi](https://github.com/badlogic/pi-mono/tree/main/packages/coding-agent)
+A [pi](https://github.com/earendil-works/pi-mono/tree/main/packages/coding-agent)
 extension that toggles fast mode and applies provider service tiers.
 
 ## 📦 Install

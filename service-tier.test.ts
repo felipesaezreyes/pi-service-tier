@@ -15,7 +15,7 @@ import type {
   ExtensionCommandContext,
   ExtensionContext,
   RegisteredCommand,
-} from "@mariozechner/pi-coding-agent";
+} from "@earendil-works/pi-coding-agent";
 
 import serviceTierExtension from "./service-tier.ts";
 import {
