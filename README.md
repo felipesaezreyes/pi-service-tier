@@ -3,16 +3,11 @@
 A [pi](https://github.com/earendil-works/pi-mono/tree/main/packages/coding-agent)
 extension that toggles fast mode and applies provider service tiers.
 
-## 📦 Install
+## 🚀 Installation
 
-```bash
+```sh
 pi install npm:pi-service-tier
 ```
-
-If you use [pi-fancy-footer](https://github.com/mavam/pi-fancy-footer), you'll
-get a service tier widget in the footer:
-
-![pi-fancy-footer screenshot](screenshot.png)
 
 ## ✨ What it does
 
@@ -32,7 +27,7 @@ get a service tier widget in the footer:
   appears first, followed by the remaining supported providers. Press Enter or
   Space to cycle through `off` and the provider-specific tiers.
 
-## ⚙️ Configure
+## ⚙️ Configuration
 
 Run `/service-tier` or create `~/.pi/agent/service-tier.json`:
 
@@ -66,6 +61,8 @@ When [pi-fancy-footer](https://github.com/mavam/pi-fancy-footer) is installed,
 the widget appears only when the active model uses a supported provider/API pair
 and that provider has a configured tier.
 
+![pi-fancy-footer screenshot](screenshot.png)
+
 The widget id is `pi-service-tier.service-tier`. It uses the current
 `pi-fancy-footer` extension widget API, with row `1`, order `8`, right
 alignment, and no grow behavior by default.
@@ -77,6 +74,12 @@ alignment, and no grow behavior by default.
   calculation reads the requested tier from provider options. Until pi exposes a
   first-class extension path for that option, displayed usage costs can omit
   flex or priority multipliers.
+
+## 🧹 Uninstall
+
+```sh
+pi remove npm:pi-service-tier
+```
 
 ## 📄 License
 
