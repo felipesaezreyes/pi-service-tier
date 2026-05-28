@@ -11,10 +11,13 @@ import {
   type SettingItem,
 } from "@earendil-works/pi-tui";
 import {
+  ANTHROPIC_BETA_HEADER,
   DEFAULT_SERVICE_TIER_CONFIG,
   SERVICE_TIER_PROVIDER_DEFINITIONS,
   applyServiceTierToPayload,
   createServiceTierSections,
+  getManagedBetaHeaders,
+  getRequiredBetaHeaders,
   getServiceTierConfigPath,
   isServiceTierProvider,
   loadServiceTierConfig,
@@ -83,6 +86,54 @@ function createServiceTierSettingItems(
 export default function (pi: ExtensionAPI) {
   let currentServiceTier: ServiceTierName | "" = "";
   let lastConfigWarning = "";
+  let syncingModelHeaders = false;
+
+  /**
+   * Some tiers (Anthropic fast mode) require a beta request header. Request
+   * payloads cannot carry headers, so we inject them onto the active model via
+   * `pi.setModel`. We only touch the `anthropic-beta` header values this
+   * extension manages, preserving any other headers and beta flags.
+   */
+  const syncModelBetaHeaders = async (
+    ctx: { model?: ExtensionContext["model"] },
+    config: ServiceTierConfigSnapshot,
+  ): Promise<void> => {
+    const model = ctx.model;
+    if (!model || syncingModelHeaders) return;
+
+    const required = getRequiredBetaHeaders(config, model);
+    const managed = getManagedBetaHeaders();
+    const headers: Record<string, string> = { ...(model.headers ?? {}) };
+    const previousValue = headers[ANTHROPIC_BETA_HEADER] ?? "";
+
+    const tokens = previousValue
+      .split(",")
+      .map((token) => token.trim())
+      .filter(Boolean)
+      .filter((token) => !managed.includes(token));
+    for (const token of required) {
+      if (!tokens.includes(token)) tokens.push(token);
+    }
+
+    const nextValue = tokens.join(",");
+    if (nextValue === previousValue) return;
+
+    if (nextValue) headers[ANTHROPIC_BETA_HEADER] = nextValue;
+    else delete headers[ANTHROPIC_BETA_HEADER];
+
+    syncingModelHeaders = true;
+    try {
+      await pi.setModel({ ...model, headers });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      lastConfigWarning = warnOnce(
+        `failed to apply request headers: ${message}`,
+        lastConfigWarning,
+      );
+    } finally {
+      syncingModelHeaders = false;
+    }
+  };
 
   const loadConfigOrDefault = (): ServiceTierConfigSnapshot => {
     try {
@@ -133,6 +184,7 @@ export default function (pi: ExtensionAPI) {
     try {
       writeServiceTierConfigSnapshot(config);
       refreshServiceTier(ctx, config, true);
+      void syncModelBetaHeaders(ctx, config);
       return true;
     } catch (error) {
       notifyConfigWriteError(ctx, error);
@@ -248,11 +300,15 @@ export default function (pi: ExtensionAPI) {
   });
 
   pi.on("session_start", async (_event, ctx) => {
-    refreshServiceTier(ctx);
+    const config = loadConfigOrDefault();
+    refreshServiceTier(ctx, config);
+    await syncModelBetaHeaders(ctx, config);
   });
 
   pi.on("model_select", async (_event, ctx) => {
-    refreshServiceTier(ctx);
+    const config = loadConfigOrDefault();
+    refreshServiceTier(ctx, config);
+    await syncModelBetaHeaders(ctx, config);
   });
 
   pi.on("before_provider_request", async (event, ctx) => {

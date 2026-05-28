@@ -20,8 +20,10 @@ pi install npm:pi-service-tier
 
 ## 🚀 Commands
 
-- `/fast`: toggles the current model provider between its fast tier and off. The
-  supported providers all use `priority` as the fast tier.
+- `/fast`: toggles the current model provider between its fast tier and off.
+  OpenAI and Google providers use `priority` as the fast tier. Anthropic uses
+  `fast`, which sends Anthropic [fast mode](https://docs.anthropic.com/) rather
+  than a `service_tier`.
 
 - `/service-tier`: opens an interactive editor. The current model provider
   appears first, followed by the remaining supported providers. Press Enter or
@@ -35,7 +37,7 @@ Run `/service-tier` or create `~/.pi/agent/service-tier.json`:
 {
   "openai": "priority",
   "openai-codex": "flex",
-  "anthropic": "priority",
+  "anthropic": "fast",
   "google": "priority",
   "google-vertex": "flex"
 }
@@ -43,17 +45,35 @@ Run `/service-tier` or create `~/.pi/agent/service-tier.json`:
 
 ### Supported providers
 
-| Provider        | Tiers                  | Fast tier  |
-| --------------- | ---------------------- | ---------- |
-| `openai`        | `flex`, `priority`     | `priority` |
-| `openai-codex`  | `flex`, `priority`     | `priority` |
-| `anthropic`     | `priority`, `standard` | `priority` |
-| `google`        | `flex`, `priority`     | `priority` |
-| `google-vertex` | `flex`, `priority`     | `priority` |
+| Provider        | Tiers                | Fast tier  |
+| --------------- | -------------------- | ---------- |
+| `openai`        | `flex`, `priority`   | `priority` |
+| `openai-codex`  | `flex`, `priority`   | `priority` |
+| `anthropic`     | `fast`, `standard`   | `fast`     |
+| `google`        | `flex`, `priority`   | `priority` |
+| `google-vertex` | `flex`, `priority`   | `priority` |
 
 To turn a provider off, omit its key. Only the values listed above are accepted.
 Batch APIs are separate asynchronous APIs and are not configured by this
 extension.
+
+### Anthropic fast mode
+
+Unlike the other providers (which set a `service_tier` field), Anthropic's `fast`
+tier uses Anthropic **fast mode**. When enabled, requests get:
+
+- a `speed: "fast"` body field, and
+- the `anthropic-beta: fast-mode-2026-02-01` request header.
+
+Request payloads cannot carry headers, so the beta header is injected onto the
+active model via `pi.setModel` whenever the model changes or the tier is
+toggled. Any provider whose API is `anthropic-messages` (including proxied
+providers such as `anthropic-new`) is treated as Anthropic.
+
+> **Note:** because the header is applied at the model level, while Anthropic
+> fast mode is active this extension owns the `anthropic-beta` header value
+> (preserving any non-managed beta flags it finds there). Pi-internal beta flags
+> added at request time are not visible to the extension.
 
 ## 🧩 Footer widget
 

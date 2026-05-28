@@ -15,14 +15,33 @@ export const SERVICE_TIER_PROVIDERS = [
 ] as const;
 export type ServiceTierProvider = (typeof SERVICE_TIER_PROVIDERS)[number];
 
-export type ServiceTierName = "flex" | "priority" | "standard";
+export type ServiceTierName = "flex" | "priority" | "standard" | "fast";
 export type ServiceTierConfigSnapshot = Partial<
   Record<ServiceTierProvider, ServiceTierName>
 >;
 
+/**
+ * How a tier is applied to the provider request.
+ * - "service_tier": top-level `service_tier` body field (OpenAI/Anthropic) or
+ *   nested `config.serviceTier` (Google).
+ * - "speed": Anthropic fast mode, applied as a top-level `speed` body field and
+ *   gated behind a beta header (see `betaHeader`).
+ */
+export type ServiceTierMechanism = "service_tier" | "speed";
+
+/** Anthropic fast mode beta header value (sent via `anthropic-beta`). */
+export const ANTHROPIC_FAST_MODE_BETA = "fast-mode-2026-02-01";
+
+/** Request header used to opt into Anthropic beta features. */
+export const ANTHROPIC_BETA_HEADER = "anthropic-beta";
+
 export interface ServiceTier {
   name: ServiceTierName;
   value: string;
+  /** Defaults to "service_tier" when omitted. */
+  mechanism?: ServiceTierMechanism;
+  /** Beta header value that must be present for this tier to work. */
+  betaHeader?: string;
 }
 
 export const DEFAULT_SERVICE_TIER_CONFIG: ServiceTierConfigSnapshot = {};
@@ -32,10 +51,20 @@ export interface ServiceTierProviderDefinition {
   api: string;
   tiers: readonly ServiceTier[];
   fastTier?: ServiceTierName;
+  /**
+   * When true, any model using this provider's `api` is treated as this
+   * provider regardless of its provider id. This lets proxied Anthropic
+   * endpoints (e.g. `anthropic-new`) pick up the configured tier.
+   */
+  matchByApi?: boolean;
 }
 
-function tier(name: ServiceTierName, value = name): ServiceTier {
-  return { name, value };
+function tier(
+  name: ServiceTierName,
+  value = name,
+  extra?: Pick<ServiceTier, "mechanism" | "betaHeader">,
+): ServiceTier {
+  return { name, value, ...extra };
 }
 
 export const SERVICE_TIER_PROVIDER_DEFINITIONS: Record<
@@ -57,8 +86,18 @@ export const SERVICE_TIER_PROVIDER_DEFINITIONS: Record<
   anthropic: {
     label: "Anthropic",
     api: "anthropic-messages",
-    tiers: [tier("priority", "auto"), tier("standard", "standard_only")],
-    fastTier: "priority",
+    // Treat any anthropic-messages model (incl. proxied ones like
+    // `anthropic-new`) as Anthropic.
+    matchByApi: true,
+    tiers: [
+      // Anthropic fast mode: `speed: "fast"` body field + beta header.
+      tier("fast", "fast", {
+        mechanism: "speed",
+        betaHeader: ANTHROPIC_FAST_MODE_BETA,
+      }),
+      tier("standard", "standard_only"),
+    ],
+    fastTier: "fast",
   },
   google: {
     label: "Google Gemini",
@@ -190,9 +229,21 @@ export function modelSupportsServiceTier(
 export function getServiceTierProviderForModel(
   model: { api?: unknown; provider?: unknown } | undefined,
 ): ServiceTierProvider | undefined {
-  if (!model || !isServiceTierProvider(model.provider)) return undefined;
-  const definition = SERVICE_TIER_PROVIDER_DEFINITIONS[model.provider];
-  return model.api === definition.api ? model.provider : undefined;
+  if (!model) return undefined;
+
+  // Exact provider-id match (with matching api).
+  if (isServiceTierProvider(model.provider)) {
+    const definition = SERVICE_TIER_PROVIDER_DEFINITIONS[model.provider];
+    if (model.api === definition.api) return model.provider;
+  }
+
+  // API-based match for providers that opt in (e.g. proxied Anthropic).
+  for (const provider of SERVICE_TIER_PROVIDERS) {
+    const definition = SERVICE_TIER_PROVIDER_DEFINITIONS[provider];
+    if (definition.matchByApi && model.api === definition.api) return provider;
+  }
+
+  return undefined;
 }
 
 export function getConfiguredServiceTier(
@@ -221,19 +272,27 @@ function getTier(
 function applyPayloadServiceTier(
   payload: Record<string, unknown>,
   provider: ServiceTierProvider,
-  value: string,
+  serviceTier: ServiceTier,
 ): Record<string, unknown> {
+  // Anthropic fast mode is applied as a top-level `speed` field, not
+  // `service_tier`. The accompanying beta header is applied separately via the
+  // model headers (see service-tier.ts), since request payloads cannot carry
+  // headers.
+  if (serviceTier.mechanism === "speed") {
+    return { ...payload, speed: serviceTier.value };
+  }
+
   if (provider === "google" || provider === "google-vertex") {
     return {
       ...payload,
       config: {
         ...(isRecord(payload.config) ? payload.config : {}),
-        serviceTier: value,
+        serviceTier: serviceTier.value,
       },
     };
   }
 
-  return { ...payload, service_tier: value };
+  return { ...payload, service_tier: serviceTier.value };
 }
 
 export function applyServiceTierToPayload(
@@ -248,7 +307,34 @@ export function applyServiceTierToPayload(
   const serviceTier = getTier(provider, serviceTierName);
   if (!serviceTier) return undefined;
 
-  return applyPayloadServiceTier(payload, provider, serviceTier.value);
+  return applyPayloadServiceTier(payload, provider, serviceTier);
+}
+
+/** All beta header values this extension manages across every provider/tier. */
+export function getManagedBetaHeaders(): string[] {
+  const headers = new Set<string>();
+  for (const provider of SERVICE_TIER_PROVIDERS) {
+    for (const serviceTier of SERVICE_TIER_PROVIDER_DEFINITIONS[provider].tiers) {
+      if (serviceTier.betaHeader) headers.add(serviceTier.betaHeader);
+    }
+  }
+  return [...headers];
+}
+
+/**
+ * Beta header values required by the effective tier for `model`, given
+ * `config`. Empty when no tier is configured or the tier needs no beta header.
+ */
+export function getRequiredBetaHeaders(
+  config: ServiceTierConfigSnapshot,
+  model: { api?: unknown; provider?: unknown } | undefined,
+): string[] {
+  const provider = getServiceTierProviderForModel(model);
+  const serviceTierName = getConfiguredServiceTier(config, provider);
+  if (!provider || !serviceTierName) return [];
+
+  const serviceTier = getTier(provider, serviceTierName);
+  return serviceTier?.betaHeader ? [serviceTier.betaHeader] : [];
 }
 
 export interface FastToggleResult {

@@ -57,12 +57,14 @@ function setupExtension(): {
   emitExtensionEvent: (event: string, payload: unknown) => void;
   emitPiEvent: (event: string, payload: unknown, ctx: ExtensionContext) => Promise<unknown[]>;
   notifications: CapturedNotification[];
+  setModelCalls: { id?: unknown; headers?: Record<string, string> }[];
   context: (model: ExtensionContext["model"]) => ExtensionCommandContext;
 } {
   const commands = new Map<string, RegisteredCommand>();
   const handlers = new Map<string, ((event: unknown, ctx: ExtensionContext) => unknown)[]>();
   const eventHandlers = new Map<string, ((payload: unknown) => void)[]>();
   const notifications: CapturedNotification[] = [];
+  const setModelCalls: { id?: unknown; headers?: Record<string, string> }[] = [];
 
   serviceTierExtension({
     registerCommand(name, options) {
@@ -72,6 +74,10 @@ function setupExtension(): {
       const entries = handlers.get(event) ?? [];
       entries.push(handler as (event: unknown, ctx: ExtensionContext) => unknown);
       handlers.set(event, entries);
+    },
+    async setModel(model: { id?: unknown; headers?: Record<string, string> }) {
+      setModelCalls.push(model);
+      return true;
     },
     events: {
       on(event, handler) {
@@ -87,6 +93,7 @@ function setupExtension(): {
 
   return {
     commands,
+    setModelCalls,
     emitExtensionEvent(event, payload) {
       for (const handler of eventHandlers.get(event) ?? []) handler(payload);
     },
@@ -123,14 +130,14 @@ test("parseServiceTierConfigValue accepts current provider keys and tiers", () =
     parseServiceTierConfigValue("config", {
       openai: "priority",
       "openai-codex": "flex",
-      anthropic: "priority",
+      anthropic: "fast",
       google: "priority",
       "google-vertex": "flex",
     }),
     {
       openai: "priority",
       "openai-codex": "flex",
-      anthropic: "priority",
+      anthropic: "fast",
       google: "priority",
       "google-vertex": "flex",
     },
@@ -187,13 +194,13 @@ test("loadServiceTierConfig reads and writes service-tier.json", () =>
     const configPath = join(dir, SERVICE_TIER_CONFIG_FILE);
     writeFileSync(
       configPath,
-      JSON.stringify({ openai: "priority", anthropic: "priority", google: "flex" }),
+      JSON.stringify({ openai: "priority", anthropic: "fast", google: "flex" }),
     );
 
     assert.equal(getServiceTierConfigPath(dir), configPath);
     assert.deepEqual(loadServiceTierConfig(configPath), {
       openai: "priority",
-      anthropic: "priority",
+      anthropic: "fast",
       google: "flex",
     });
 
@@ -211,7 +218,7 @@ test("resolveEffectiveServiceTier only enables matching built-in providers", () 
   const config = {
     openai: "priority",
     "openai-codex": "flex",
-    anthropic: "priority",
+    anthropic: "fast",
     google: "priority",
     "google-vertex": "flex",
   } as const;
@@ -235,7 +242,7 @@ test("resolveEffectiveServiceTier only enables matching built-in providers", () 
       provider: "anthropic",
       api: "anthropic-messages",
     }),
-    "priority",
+    "fast",
   );
   assert.equal(
     resolveEffectiveServiceTier(config, {
@@ -271,8 +278,13 @@ test("resolveEffectiveServiceTier only enables matching built-in providers", () 
     true,
   );
   assert.equal(
-    modelSupportsServiceTier({ provider: "openai", api: "anthropic-messages" }),
+    modelSupportsServiceTier({ provider: "openai", api: "openai-completions" }),
     false,
+  );
+  // Any anthropic-messages model is matched by api (proxied providers too).
+  assert.equal(
+    modelSupportsServiceTier({ provider: "anthropic-new", api: "anthropic-messages" }),
+    true,
   );
   assert.equal(
     modelSupportsServiceTier({
@@ -287,7 +299,7 @@ test("applyServiceTierToPayload injects provider-specific service tier values", 
   const config = {
     openai: "priority",
     "openai-codex": "flex",
-    anthropic: "priority",
+    anthropic: "fast",
     google: "priority",
     "google-vertex": "flex",
   } as const;
@@ -314,7 +326,16 @@ test("applyServiceTierToPayload injects provider-specific service tier values", 
       config,
       { provider: "anthropic", api: "anthropic-messages" },
     ),
-    { model: "claude-sonnet-4-5", service_tier: "auto" },
+    { model: "claude-sonnet-4-5", speed: "fast" },
+  );
+  // Proxied anthropic providers (matched by api) also get fast mode.
+  assert.deepEqual(
+    applyServiceTierToPayload(
+      { model: "claude-opus-4-8" },
+      { anthropic: "fast" },
+      { provider: "anthropic-new", api: "anthropic-messages" },
+    ),
+    { model: "claude-opus-4-8", speed: "fast" },
   );
   assert.deepEqual(
     applyServiceTierToPayload(
@@ -400,9 +421,9 @@ test("toggleFastServiceTier maps providers to fast and off", () => {
       { provider: "anthropic", api: "anthropic-messages" },
     ),
     {
-      config: { anthropic: "priority" },
+      config: { anthropic: "fast" },
       provider: "anthropic",
-      serviceTier: "priority",
+      serviceTier: "fast",
       fast: true,
     },
   );
@@ -423,6 +444,64 @@ test("toggleFastServiceTier maps providers to fast and off", () => {
     undefined,
   );
 });
+
+test("anthropic fast mode injects and removes the fast-mode beta header", async () =>
+  withAgentDir(async (dir) => {
+    const anthropicModel = {
+      provider: "anthropic-new",
+      api: "anthropic-messages",
+      id: "claude-opus-4-8",
+      headers: { "Shopify-Usage-Tag": "[\"pi\"]" },
+    } as unknown as ExtensionContext["model"];
+
+    // Fast mode on -> beta header added, existing headers preserved.
+    writeFileSync(
+      join(dir, SERVICE_TIER_CONFIG_FILE),
+      JSON.stringify({ anthropic: "fast" }),
+    );
+    const on = setupExtension();
+    await on.emitPiEvent(
+      "model_select",
+      { type: "model_select" },
+      on.context(anthropicModel),
+    );
+    assert.deepEqual(on.setModelCalls.at(-1)?.headers, {
+      "Shopify-Usage-Tag": "[\"pi\"]",
+      "anthropic-beta": "fast-mode-2026-02-01",
+    });
+
+    // Fast mode off -> only our managed beta token is removed.
+    writeFileSync(join(dir, SERVICE_TIER_CONFIG_FILE), JSON.stringify({}));
+    const off = setupExtension();
+    await off.emitPiEvent(
+      "model_select",
+      { type: "model_select" },
+      off.context({
+        ...anthropicModel,
+        headers: {
+          "Shopify-Usage-Tag": "[\"pi\"]",
+          "anthropic-beta": "interleaved-thinking-2025-05-14,fast-mode-2026-02-01",
+        },
+      } as unknown as ExtensionContext["model"]),
+    );
+    assert.deepEqual(off.setModelCalls.at(-1)?.headers, {
+      "Shopify-Usage-Tag": "[\"pi\"]",
+      "anthropic-beta": "interleaved-thinking-2025-05-14",
+    });
+
+    // Non-anthropic models are never touched.
+    const openai = setupExtension();
+    await openai.emitPiEvent(
+      "model_select",
+      { type: "model_select" },
+      openai.context({
+        provider: "openai",
+        api: "openai-responses",
+        id: "gpt-5.5",
+      } as ExtensionContext["model"]),
+    );
+    assert.equal(openai.setModelCalls.length, 0);
+  }));
 
 test("/fast persists fast mode or removes the current provider", async () =>
   withAgentDir(async (dir) => {
@@ -487,9 +566,9 @@ test("/fast persists fast mode or removes the current provider", async () =>
     );
     assert.deepEqual(
       JSON.parse(readFileSync(join(dir, SERVICE_TIER_CONFIG_FILE), "utf8")),
-      { anthropic: "priority" },
+      { anthropic: "fast" },
     );
-    assert.equal(notifications.at(-1)?.message, "Anthropic service tier: priority");
+    assert.equal(notifications.at(-1)?.message, "Anthropic service tier: fast");
 
     await fastCommand.handler(
       "",
@@ -550,7 +629,7 @@ test("/fast persists fast mode or removes the current provider", async () =>
 
 test("createServiceTierSections puts the current model first with provider-specific options", () => {
   const sections = createServiceTierSections(
-    { openai: "priority", anthropic: "priority", google: "flex" },
+    { openai: "priority", anthropic: "fast", google: "flex" },
     {
       provider: "anthropic",
       api: "anthropic-messages",
@@ -561,10 +640,10 @@ test("createServiceTierSections puts the current model first with provider-speci
 
   assert.equal(sections[0]?.id, "current");
   assert.equal(sections[0]?.items[0]?.id, "anthropic");
-  assert.equal(sections[0]?.items[0]?.currentValue, "priority");
+  assert.equal(sections[0]?.items[0]?.currentValue, "fast");
   assert.deepEqual(sections[0]?.items[0]?.values, [
     "off",
-    "priority",
+    "fast",
     "standard",
   ]);
   assert.equal(sections[1]?.id, "providers");
@@ -590,7 +669,7 @@ test("fancy footer widget renders the active tier name without markup", async ()
   withAgentDir(async (dir) => {
     writeFileSync(
       join(dir, SERVICE_TIER_CONFIG_FILE),
-      JSON.stringify({ anthropic: "priority" }),
+      JSON.stringify({ anthropic: "fast" }),
     );
 
     const { emitExtensionEvent, emitPiEvent, context } = setupExtension();
@@ -629,7 +708,7 @@ test("fancy footer widget renders the active tier name without markup", async ()
     assert.equal(widget?.align, "right");
     assert.equal(widget?.grow, false);
     assert.equal(widget?.visible?.({}), true);
-    assert.equal(widget?.render({}), "priority");
+    assert.equal(widget?.render({}), "fast");
   }));
 
 test("fancy footer widget is hidden when the current provider is off", async () =>
