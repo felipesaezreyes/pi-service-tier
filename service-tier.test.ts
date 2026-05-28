@@ -23,6 +23,8 @@ import {
   SERVICE_TIER_CONFIG_FILE,
   applyServiceTierToPayload,
   createServiceTierSections,
+  getManagedBetaHeaders,
+  getRequiredBetaHeaders,
   getServiceTierConfigPath,
   loadServiceTierConfig,
   modelSupportsServiceTier,
@@ -57,14 +59,12 @@ function setupExtension(): {
   emitExtensionEvent: (event: string, payload: unknown) => void;
   emitPiEvent: (event: string, payload: unknown, ctx: ExtensionContext) => Promise<unknown[]>;
   notifications: CapturedNotification[];
-  setModelCalls: { id?: unknown; headers?: Record<string, string> }[];
   context: (model: ExtensionContext["model"]) => ExtensionCommandContext;
 } {
   const commands = new Map<string, RegisteredCommand>();
   const handlers = new Map<string, ((event: unknown, ctx: ExtensionContext) => unknown)[]>();
   const eventHandlers = new Map<string, ((payload: unknown) => void)[]>();
   const notifications: CapturedNotification[] = [];
-  const setModelCalls: { id?: unknown; headers?: Record<string, string> }[] = [];
 
   serviceTierExtension({
     registerCommand(name, options) {
@@ -74,10 +74,6 @@ function setupExtension(): {
       const entries = handlers.get(event) ?? [];
       entries.push(handler as (event: unknown, ctx: ExtensionContext) => unknown);
       handlers.set(event, entries);
-    },
-    async setModel(model: { id?: unknown; headers?: Record<string, string> }) {
-      setModelCalls.push(model);
-      return true;
     },
     events: {
       on(event, handler) {
@@ -93,7 +89,6 @@ function setupExtension(): {
 
   return {
     commands,
-    setModelCalls,
     emitExtensionEvent(event, payload) {
       for (const handler of eventHandlers.get(event) ?? []) handler(payload);
     },
@@ -445,63 +440,30 @@ test("toggleFastServiceTier maps providers to fast and off", () => {
   );
 });
 
-test("anthropic fast mode injects and removes the fast-mode beta header", async () =>
-  withAgentDir(async (dir) => {
-    const anthropicModel = {
-      provider: "anthropic-new",
-      api: "anthropic-messages",
-      id: "claude-opus-4-8",
-      headers: { "Shopify-Usage-Tag": "[\"pi\"]" },
-    } as unknown as ExtensionContext["model"];
-
-    // Fast mode on -> beta header added, existing headers preserved.
-    writeFileSync(
-      join(dir, SERVICE_TIER_CONFIG_FILE),
-      JSON.stringify({ anthropic: "fast" }),
-    );
-    const on = setupExtension();
-    await on.emitPiEvent(
-      "model_select",
-      { type: "model_select" },
-      on.context(anthropicModel),
-    );
-    assert.deepEqual(on.setModelCalls.at(-1)?.headers, {
-      "Shopify-Usage-Tag": "[\"pi\"]",
-      "anthropic-beta": "fast-mode-2026-02-01",
-    });
-
-    // Fast mode off -> only our managed beta token is removed.
-    writeFileSync(join(dir, SERVICE_TIER_CONFIG_FILE), JSON.stringify({}));
-    const off = setupExtension();
-    await off.emitPiEvent(
-      "model_select",
-      { type: "model_select" },
-      off.context({
-        ...anthropicModel,
-        headers: {
-          "Shopify-Usage-Tag": "[\"pi\"]",
-          "anthropic-beta": "interleaved-thinking-2025-05-14,fast-mode-2026-02-01",
-        },
-      } as unknown as ExtensionContext["model"]),
-    );
-    assert.deepEqual(off.setModelCalls.at(-1)?.headers, {
-      "Shopify-Usage-Tag": "[\"pi\"]",
-      "anthropic-beta": "interleaved-thinking-2025-05-14",
-    });
-
-    // Non-anthropic models are never touched.
-    const openai = setupExtension();
-    await openai.emitPiEvent(
-      "model_select",
-      { type: "model_select" },
-      openai.context({
-        provider: "openai",
-        api: "openai-responses",
-        id: "gpt-5.5",
-      } as ExtensionContext["model"]),
-    );
-    assert.equal(openai.setModelCalls.length, 0);
-  }));
+test("getRequiredBetaHeaders reports the anthropic fast-mode beta header", () => {
+  assert.deepEqual(
+    getRequiredBetaHeaders(
+      { anthropic: "fast" },
+      { provider: "anthropic-new", api: "anthropic-messages" },
+    ),
+    ["fast-mode-2026-02-01"],
+  );
+  assert.deepEqual(
+    getRequiredBetaHeaders(
+      { anthropic: "standard" },
+      { provider: "anthropic", api: "anthropic-messages" },
+    ),
+    [],
+  );
+  assert.deepEqual(
+    getRequiredBetaHeaders(
+      { openai: "priority" },
+      { provider: "openai", api: "openai-responses" },
+    ),
+    [],
+  );
+  assert.deepEqual(getManagedBetaHeaders(), ["fast-mode-2026-02-01"]);
+});
 
 test("/fast persists fast mode or removes the current provider", async () =>
   withAgentDir(async (dir) => {

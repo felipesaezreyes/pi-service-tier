@@ -60,20 +60,39 @@ extension.
 ### Anthropic fast mode
 
 Unlike the other providers (which set a `service_tier` field), Anthropic's `fast`
-tier uses Anthropic **fast mode**. When enabled, requests get:
+tier uses Anthropic **fast mode**. A fast request needs two things:
 
-- a `speed: "fast"` body field, and
+- a `speed: "fast"` body field — this extension adds it automatically, and
 - the `anthropic-beta: fast-mode-2026-02-01` request header.
 
-Request payloads cannot carry headers, so the beta header is injected onto the
-active model via `pi.setModel` whenever the model changes or the tier is
-toggled. Any provider whose API is `anthropic-messages` (including proxied
-providers such as `anthropic-new`) is treated as Anthropic.
+Any provider whose API is `anthropic-messages` (including proxied providers such
+as `anthropic-new`) is treated as Anthropic.
 
-> **Note:** because the header is applied at the model level, while Anthropic
-> fast mode is active this extension owns the `anthropic-beta` header value
-> (preserving any non-managed beta flags it finds there). Pi-internal beta flags
-> added at request time are not visible to the extension.
+#### Required: enable the beta header on your model
+
+pi extensions can rewrite the request **body** but cannot add request
+**headers**, so the `anthropic-beta` header must be configured on the provider
+or model. Without it, Anthropic rejects the `speed` field with
+`speed: Extra inputs are not permitted`.
+
+Add the header to your Anthropic provider/model in `models.json` (it is
+harmless when fast mode is off — the beta flag only enables the capability):
+
+```json
+{
+  "providers": {
+    "anthropic": {
+      "headers": {
+        "anthropic-beta": "fast-mode-2026-02-01"
+      }
+    }
+  }
+}
+```
+
+The header value is also available programmatically as the exported
+`ANTHROPIC_FAST_MODE_BETA` constant, and `getRequiredBetaHeaders(config, model)`
+returns the beta headers the active tier needs.
 
 ## 🧩 Footer widget
 
